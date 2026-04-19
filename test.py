@@ -1,0 +1,1 @@
+print("Coupoun code: 12345")
