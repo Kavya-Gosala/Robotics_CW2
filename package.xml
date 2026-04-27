@@ -1,0 +1,28 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>com760cw2_com760group30</name>
+  <version>1.0.0</version>
+  <description>
+    Collapsed School Rescue Robot - Autonomous Navigation
+    using Bug2 Algorithm and Q-Learning for COM760 Group 30.
+    Robot navigates collapsed school building, detects survivors
+    and returns to emergency base.
+  </description>
+
+  <maintainer email="group30@ulster.ac.uk">COM760 Group 30</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+
+  <depend>rospy</depend>
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>tf</depend>
+  <depend>gazebo_ros</depend>
+  <depend>robot_state_publisher</depend>
+
+  <build_depend>message_generation</build_depend>
+  <exec_depend>message_runtime</exec_depend>
+</package>

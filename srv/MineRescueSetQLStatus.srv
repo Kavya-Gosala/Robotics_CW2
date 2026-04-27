@@ -1,0 +1,8 @@
+bool flag
+float32 learning_rate
+float32 discount
+float32 epsilon
+int32 max_episodes
+---
+bool success
+string message

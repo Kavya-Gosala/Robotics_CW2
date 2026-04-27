@@ -1,0 +1,49 @@
+<launch>
+  <param name="th_yaw"  value="2.0"/>
+  <param name="th_dist" value="0.25"/>
+
+  <param name="robot_description"
+    command="cat $(find com760cw2_com760group30)/urdf/com760group30Bot.urdf"/>
+
+  <include file="$(find gazebo_ros)/launch/empty_world.launch">
+    <arg name="world_name"
+      value="$(find com760cw2_com760group30)/world/school_rescue.world"/>
+    <arg name="paused"       value="false"/>
+    <arg name="use_sim_time" value="true"/>
+    <arg name="gui"          value="true"/>
+    <arg name="headless"     value="false"/>
+    <arg name="debug"        value="false"/>
+  </include>
+
+  <node name="urdf_spawner" pkg="gazebo_ros" type="spawn_model"
+    respawn="false" output="screen"
+    args="-urdf -model com760group30Bot
+          -param robot_description
+          -x -7.0 -y 0.0 -z 0.1"/>
+
+  <node name="robot_state_publisher"
+    pkg="robot_state_publisher"
+    type="robot_state_publisher"
+    output="screen"/>
+
+  <node name="go_to_point"
+    pkg="com760cw2_com760group30"
+    type="GoToPoint.py"
+    output="screen"/>
+
+  <node name="follow_wall"
+    pkg="com760cw2_com760group30"
+    type="FollowWall.py"
+    output="screen"/>
+
+  <node name="bug2_coordinator"
+    pkg="com760cw2_com760group30"
+    type="Bug2.py"
+    output="screen"/>
+
+  <node name="survivor_detector"
+    pkg="com760cw2_com760group30"
+    type="SurvivorDetector.py"
+    output="screen"/>
+
+</launch>
