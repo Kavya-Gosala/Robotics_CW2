@@ -26,17 +26,18 @@ class FollowWall:
         }
 
         self.linear_speed  = 0.3
-        self.angular_speed = 0.3
+        self.angular_speed = 0.5   # faster turning to clear corners
         self.turn_direction = 'left'
 
         self.front  = float('inf')
         self.left   = float('inf')
         self.right  = float('inf')
 
-        self.wall_threshold = 0.6
-        self.follow_dist    = 0.55
-        self.last_change    = 0.0
-        self.min_state_time = 1.0
+        self.wall_threshold  = 0.6
+        self.turn_clear_dist = 0.7  # front must be this clear before resuming forward
+        self.follow_dist     = 0.55
+        self.last_change     = 0.0
+        self.min_state_time  = 1.0
 
         self.pub_vel   = rospy.Publisher(
             '/com760group30Bot/cmd_vel', Twist, queue_size=1)
@@ -98,19 +99,22 @@ class FollowWall:
         s      = max(1, int(n * 30 / 360))
         clean  = [r if (not math.isnan(r) and
                         not math.isinf(r) and
-                        r > 0.05) else max_r
+                        r > 0.15) else max_r
                   for r in ranges]
-        self.front = min(min(clean[-s:]), min(clean[:s]))
-        self.left  = (min(clean[s*3: n//2])
-                      if s*3 < n//2 else max_r)
-        self.right = (min(clean[n//2: -(s*3)])
-                      if s*3 < n//2 else max_r)
+        # angle_min=-π → index 0=rear, index n//2=forward (angle 0)
+        mid = n // 2
+        self.front = min(clean[mid - s: mid + s])
+        self.left  = min(clean[mid + s: mid + s*3]) if mid + s*3 <= n else max_r
+        self.right = min(clean[mid - s*3: mid - s]) if mid - s*3 >= 0 else max_r
 
     def find_wall(self):
+        # Immediately react if wall is already in front (Bug2 hands off with
+        # obstacle already detected — don't drive into it for min_state_time).
+        if self.front < self.wall_threshold:
+            self.change_state(1)
+            return Twist()
         if rospy.get_time() - self.last_change > self.min_state_time:
-            if self.front < self.wall_threshold:
-                self.change_state(1)
-            elif self.left < 0.7 or self.right < 0.7:
+            if self.left < 0.7 or self.right < 0.7:
                 self.change_state(2)
         msg = Twist()
         msg.linear.x  = self.linear_speed
@@ -119,7 +123,7 @@ class FollowWall:
 
     def turn(self):
         if rospy.get_time() - self.last_change > 1.5:
-            if self.front > self.wall_threshold:
+            if self.front > self.turn_clear_dist:
                 self.change_state(2)
         msg = Twist()
         msg.linear.x  = 0.0
@@ -130,18 +134,20 @@ class FollowWall:
 
     def follow_the_wall(self):
         if rospy.get_time() - self.last_change > self.min_state_time:
-            if self.front < self.wall_threshold - 0.1:
+            if self.front < self.wall_threshold:
                 self.change_state(1)
             elif self.left > 1.5 and self.right > 1.5:
                 self.change_state(0)
         msg = Twist()
         msg.linear.x = self.linear_speed
         if self.turn_direction == 'left':
+            # Turned left → wall is on RIGHT. Too close → turn left (+z) to move away.
             error = self.follow_dist - self.right
-            msg.angular.z = max(-0.3, min(0.3, -error * 0.4))
-        else:
-            error = self.follow_dist - self.left
             msg.angular.z = max(-0.3, min(0.3, error * 0.4))
+        else:
+            # Turned right → wall is on LEFT. Too close → turn right (-z) to move away.
+            error = self.follow_dist - self.left
+            msg.angular.z = max(-0.3, min(0.3, -error * 0.4))
         return msg
 
     def change_state(self, new_state):
@@ -162,3 +168,4 @@ if __name__ == '__main__':
         rospy.spin()
     except rospy.ROSInterruptException:
         pass
+        

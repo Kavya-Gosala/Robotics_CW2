@@ -1,8 +1,8 @@
 bool flag
-float32 speed
+float64 speed
+float64 goal_x
+float64 goal_y
 string direction
-float32 goal_x
-float32 goal_y
 ---
 bool success
 string message

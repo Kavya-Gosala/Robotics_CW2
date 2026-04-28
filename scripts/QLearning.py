@@ -19,6 +19,8 @@ from geometry_msgs.msg import Twist, Point
 from sensor_msgs.msg import LaserScan
 from nav_msgs.msg import Odometry
 from tf import transformations
+from gazebo_msgs.msg import ModelState
+from gazebo_msgs.srv import SetModelState
 from com760cw2_com760group30.msg import RLAction, RLReward, SurvivorDetected
 from com760cw2_com760group30.srv import (
     MineRescueSetQLStatus,
@@ -59,16 +61,16 @@ class QLearning:
         self.max_steps    = 300
         self.total_reward = 0.0
 
-        # Goal - emergency base
+        # Goal - emergency base (outside east wall, matches Bug2 waypoints)
         self.goal = Point()
-        self.goal.x = 8.0
+        self.goal.x = 11.0
         self.goal.y = 0.0
 
-        # Survivor locations
+        # Survivor locations — MUST match SurvivorDetector.py exactly
         self.survivors = [
-            {'id': 1, 'x': -8.0, 'y':  3.0, 'found': False},
+            {'id': 1, 'x': -6.0, 'y':  3.0, 'found': False},
             {'id': 2, 'x':  0.0, 'y': -3.0, 'found': False},
-            {'id': 3, 'x':  7.0, 'y':  3.0, 'found': False},
+            {'id': 3, 'x':  5.0, 'y':  3.0, 'found': False},
         ]
         self.survivors_found = 0
 
@@ -77,7 +79,14 @@ class QLearning:
         self.yaw             = 0.0
         self.prev_dist_goal  = float('inf')
         self.laser_zones     = [0] * self.N_ZONES
-        self.obs_threshold   = 0.5
+        self.min_front_dist  = float('inf')   # raw minimum front distance
+        self.obs_threshold   = 0.5            # binary zone threshold
+        self.collision_dist  = 0.20           # actual near-collision threshold
+
+        # Spawn pose used for Gazebo episode resets
+        self.spawn_x = -4.0
+        self.spawn_y = 0.0
+        self.spawn_z = 0.1
 
         # Q-table save path
         pkg_dir = os.path.dirname(os.path.abspath(__file__))
@@ -131,6 +140,7 @@ class QLearning:
             for s in self.survivors:
                 s['found'] = False
             self.survivors_found = 0
+            self.reset_robot_position()
             rospy.loginfo('='*50)
             rospy.loginfo('[QLearning] Training started!')
             rospy.loginfo(
@@ -163,14 +173,19 @@ class QLearning:
         n      = len(ranges)
         s      = max(1, int(n * 30 / 360))
         clean  = [r if (not math.isnan(r) and
-                        not math.isinf(r)) else max_r
+                        not math.isinf(r) and
+                        r > 0.15) else max_r
                   for r in ranges]
+        # angle_min=-π → index 0=rear, index n//2=forward (angle 0)
+        mid = n // 2
+        front_rays = clean[mid - s: mid + s]
+        self.min_front_dist = min(front_rays)
         raw = {
-            'front':       min(min(clean[-s:]), min(clean[:s])),
-            'front_left':  min(clean[s: s*3]) if s*3 < n else max_r,
-            'front_right': min(clean[-(s*3):-s]) if s*3 < n else max_r,
-            'left':        min(clean[s*3: n//2]) if s*3 < n//2 else max_r,
-            'right':       min(clean[n//2: -(s*3)]) if s*3 < n//2 else max_r,
+            'front':       min(front_rays),
+            'front_left':  min(clean[mid + s: mid + s*3]) if mid + s*3 <= n else max_r,
+            'front_right': min(clean[mid - s*3: mid - s]) if mid - s*3 >= 0 else max_r,
+            'left':        min(clean[mid + s*3: n])        if mid + s*3 < n  else max_r,
+            'right':       min(clean[:mid - s*3])          if mid - s*3 > 0  else max_r,
         }
         t = self.obs_threshold
         self.laser_zones = [
@@ -228,7 +243,10 @@ class QLearning:
 
     def calculate_reward(self):
         dist         = self.distance_to_goal()
-        collision    = any(z == 1 for z in self.laser_zones[:3])
+        # Use raw distance threshold (0.20 m) instead of zone binary flag
+        # so the robot is penalised only for actual near-collisions, not
+        # just for approaching walls during normal navigation.
+        collision    = self.min_front_dist < self.collision_dist
         goal_reached = dist < 0.35
 
         # Check survivors
@@ -318,8 +336,29 @@ class QLearning:
             self.survivors_found = 0
 
             self.stop_robot()
-            rospy.sleep(1.0)
+            # Reset robot to spawn; clear stale sensor cache so old crash-site
+            # laser readings don't trigger a false collision on the first step.
+            self.reset_robot_position()
+            self.min_front_dist = float('inf')
+            rospy.sleep(2.0)   # allow fresh laser data to arrive after teleport
             self.prev_dist_goal = self.distance_to_goal()
+
+    def reset_robot_position(self):
+        """Teleport robot back to spawn point via Gazebo SetModelState."""
+        try:
+            rospy.wait_for_service('/gazebo/set_model_state', timeout=10.0)
+            set_state = rospy.ServiceProxy(
+                '/gazebo/set_model_state', SetModelState)
+            state                    = ModelState()
+            state.model_name         = 'com760group30Bot'
+            state.pose.position.x    = self.spawn_x
+            state.pose.position.y    = self.spawn_y
+            state.pose.position.z    = self.spawn_z
+            state.pose.orientation.w = 1.0
+            # Zero out velocities so the robot doesn't carry momentum into new episode
+            set_state(state)
+        except Exception as exc:
+            rospy.logwarn('[QLearning] Could not reset robot position: %s', exc)
 
     def save_q_table(self):
         try:

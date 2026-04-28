@@ -1,6 +1,5 @@
 <launch>
-  <param name="th_yaw"  value="2.0"/>
-  <param name="th_dist" value="0.25"/>
+  <!-- Q-Learning mode: robot learns autonomously, no Bug2 coordinator -->
 
   <param name="robot_description"
     command="cat $(find com760cw2_com760group30)/urdf/com760group30Bot.urdf"/>
@@ -26,33 +25,23 @@
     type="robot_state_publisher"
     output="screen"/>
 
-  <node name="go_to_point"
+  <node name="q_learning"
     pkg="com760cw2_com760group30"
-    type="GoToPoint.py"
-    output="screen"/>
-
-  <node name="follow_wall"
-    pkg="com760cw2_com760group30"
-    type="FollowWall.py"
-    output="screen"/>
-
-  <node name="bug2_coordinator"
-    pkg="com760cw2_com760group30"
-    type="Bug2.py"
-    output="screen"/>
+    type="QLearning.py"
+    output="screen"
+    launch-prefix=""/>
 
   <node name="survivor_detector"
     pkg="com760cw2_com760group30"
     type="SurvivorDetector.py"
     output="screen"/>
 
-  <!-- Q-Learning node loaded but inactive.
-       Activate via:  rosservice call /q_learning_switch
-       "flag: true learning_rate: 0.5 discount: 0.9 epsilon: 0.9 max_episodes: 500"
-  -->
-  <node name="q_learning"
-    pkg="com760cw2_com760group30"
-    type="QLearning.py"
-    output="screen"/>
+  <!-- Auto-start Q-Learning training after 8 s (allows Gazebo + nodes to settle) -->
+  <node name="ql_autostart" pkg="rosservice" type="rosservice"
+    args="call --wait /q_learning_switch
+          '{flag: true, learning_rate: 0.5, discount: 0.9,
+            epsilon: 0.9, max_episodes: 500}'"
+    output="screen"
+    launch-prefix="bash -c 'sleep 8; &quot;$@&quot;' --"/>
 
 </launch>

@@ -52,6 +52,8 @@ class Bug2:
             'Child 2 — East Corridor',
             'Emergency Base — Mission Complete',
         ]
+        # Survivor waypoints (all non-last waypoints are survivors)
+        self.survivor_waypoints = {0, 1, 2}
         self.current_waypoint = 0
 
         # Current navigation goal
@@ -70,15 +72,16 @@ class Bug2:
         self.wall_follow_start  = 0.0   # timestamp when FollowWall began
 
         # Navigation parameters
-        self.speed     = 0.5
+        self.speed     = 0.8
         self.direction = 'left'
 
         # Detection thresholds
-        self.obstacle_threshold  = 0.45
-        self.m_line_threshold    = 0.25  # stricter: must be close to M-line
-        self.goal_threshold      = 0.40
-        self.min_wall_follow_secs = 3.0  # must wall-follow for ≥3 s before returning
-        self.m_line_progress_buf  = 0.40  # must be 0.4 m closer than hit point
+        self.obstacle_threshold   = 0.35
+        self.m_line_threshold     = 0.30  # how close robot must be to M-line to switch back
+        self.goal_threshold       = 1.0
+        self.min_wall_follow_secs = 6.0   # must wall-follow for ≥6 s before returning
+        self.m_line_progress_buf  = 0.50  # must be 0.5 m closer than hit point
+        self.max_wall_follow_secs = 45.0  # escape trap: force GoToPoint after 45 s
 
         # Laser front distance
         self.laser_front = float('inf')
@@ -181,9 +184,23 @@ class Bug2:
             self.change_state(3)
             return
 
-        # Only check M-line return after minimum wall-follow time
         elapsed = rospy.get_time() - self.wall_follow_start
+
+        # Only check M-line return after minimum wall-follow time
         if elapsed < self.min_wall_follow_secs:
+            return
+
+        # Escape trap: if wall-following too long without M-line progress,
+        # force GoToPoint from the current position so the robot doesn't loop forever.
+        if elapsed > self.max_wall_follow_secs:
+            rospy.logwarn(
+                '[Bug2] Wall-follow timeout (%.0f s). Forcing GoToPoint.', elapsed)
+            self.deactivate_follow_wall()
+            self.start_position.x = self.position.x
+            self.start_position.y = self.position.y
+            self.compute_m_line()
+            self.obstacle_hit_dist = float('inf')
+            self.start_go_to_point()
             return
 
         # Return to GoToPoint when back on M-line AND significantly closer
@@ -206,21 +223,41 @@ class Bug2:
 
     def waypoint_reached_behaviour(self):
         lbl = self.waypoint_labels[self.current_waypoint]
-        rospy.loginfo('[Bug2] *** Reached: %s ***', lbl)
+        is_last     = self.current_waypoint == len(self.waypoints) - 1
+        is_survivor = self.current_waypoint in self.survivor_waypoints
+
+        self.stop_robot()
+
+        if is_last:
+            # ---- Emergency base reached ----
+            rospy.logwarn('=' * 55)
+            rospy.logwarn('[Bug2] *** EMERGENCY BASE REACHED ***')
+            rospy.logwarn('[Bug2] *** MISSION COMPLETE ***')
+            rospy.logwarn('[Bug2] *** All survivors located and reported ***')
+            rospy.logwarn('=' * 55)
+            self.change_state(0)   # stand by — mission done
+            return
+        elif is_survivor:
+            # ---- Survivor found: stop, scan, signal ----
+            rospy.logwarn('=' * 55)
+            rospy.logwarn('[Bug2] *** SURVIVOR LOCATION REACHED ***')
+            rospy.logwarn('[Bug2] *** %s ***', lbl)
+            rospy.logwarn('[Bug2] *** Position: (%.1f, %.1f) ***',
+                          self.goal.x, self.goal.y)
+            rospy.logwarn('[Bug2] *** Scanning for signs of life... ***')
+            rospy.logwarn('=' * 55)
+            rospy.sleep(3.0)   # pause at survivor location
+            rospy.logwarn('[Bug2] *** SIGNAL SENT — moving to next target ***')
+            rospy.logwarn('=' * 55)
+        else:
+            # ---- Transit waypoint: no pause, continue immediately ----
+            rospy.loginfo('[Bug2] Transit waypoint %s reached.', lbl)
 
         self.current_waypoint += 1
-
-        if self.current_waypoint >= len(self.waypoints):
-            rospy.loginfo('[Bug2] *** MISSION COMPLETE. All survivors found! ***')
-            self.stop_robot()
-            rospy.signal_shutdown('Mission complete')
-            return
-
-        # Set next goal and restart GoToPoint
         next_wp = self.waypoints[self.current_waypoint]
         self.goal.x = next_wp[0]
         self.goal.y = next_wp[1]
-        rospy.loginfo('[Bug2] Next: %s (%.1f, %.1f)',
+        rospy.loginfo('[Bug2] Next target: %s (%.1f, %.1f)',
                       self.waypoint_labels[self.current_waypoint],
                       next_wp[0], next_wp[1])
 
@@ -228,7 +265,6 @@ class Bug2:
         self.start_position.y = self.position.y
         self.compute_m_line()
         self.obstacle_hit_dist = float('inf')
-        rospy.sleep(0.5)
         self.start_go_to_point()
 
     # ------------------------------------------------------------------
@@ -338,9 +374,11 @@ class Bug2:
         s      = max(1, int(n * 30 / 360))   # ±30° front cone
         clean  = [r if (not math.isnan(r) and
                         not math.isinf(r) and
-                        r > 0.05) else max_r
+                        r > 0.15) else max_r
                   for r in ranges]
-        self.laser_front = min(min(clean[-s:]), min(clean[:s]))
+        # angle_min=-π → index 0=rear, index n//2=forward (angle 0)
+        mid = n // 2
+        self.laser_front = min(clean[mid - s: mid + s])
         self.got_laser   = True
 
     def callback_survivor(self, msg):
