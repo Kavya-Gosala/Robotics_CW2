@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # COM760 Group 30 - Collapsed School Rescue Robot
 # FollowWall.py - Makes robot follow walls/obstacles
@@ -38,6 +38,7 @@ class FollowWall:
         self.follow_dist     = 0.55
         self.last_change     = 0.0
         self.min_state_time  = 1.0
+        self.max_turn_secs   = 4.0  # after this, back up instead of spinning
 
         self.pub_vel   = rospy.Publisher(
             '/com760group30Bot/cmd_vel', Twist, queue_size=1)
@@ -122,14 +123,22 @@ class FollowWall:
         return msg
 
     def turn(self):
-        if rospy.get_time() - self.last_change > 1.5:
-            if self.front > self.turn_clear_dist:
-                self.change_state(2)
+        elapsed = rospy.get_time() - self.last_change
+        if elapsed > 1.5 and self.front > self.turn_clear_dist:
+            self.change_state(2)
+            return Twist()
         msg = Twist()
-        msg.linear.x  = 0.0
-        msg.angular.z = (self.angular_speed
-            if self.turn_direction == 'left'
-            else -self.angular_speed)
+        if elapsed > self.max_turn_secs:
+            # Can't clear the front by spinning — back up to create clearance.
+            msg.linear.x  = -self.linear_speed
+            msg.angular.z = (self.angular_speed * 0.4
+                if self.turn_direction == 'left'
+                else -self.angular_speed * 0.4)
+        else:
+            msg.linear.x  = 0.0
+            msg.angular.z = (self.angular_speed
+                if self.turn_direction == 'left'
+                else -self.angular_speed)
         return msg
 
     def follow_the_wall(self):

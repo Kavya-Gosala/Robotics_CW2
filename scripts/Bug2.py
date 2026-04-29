@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # COM760 Group 30 - Collapsed School Rescue Robot
 # Bug2.py - Master coordinator implementing Bug2 algorithm
@@ -39,21 +39,28 @@ class Bug2:
         self.position = Point()
         self.yaw      = 0.0
 
-        # Mission waypoints — MUST match SurvivorDetector.py positions
+        # Mission waypoints — loaded from ROS parameter server.
+        # Edit coordinates in school_rescue_bug2.launch, not here.
         self.waypoints = [
-            (-6.0,  3.0),   # Child 1  — NW classroom
-            ( 0.0, -3.0),   # Teacher  — south corridor
-            ( 5.0,  3.0),   # Child 2  — east corridor
-            (11.0,  0.0),   # Emergency base — outside east wall
+            (rospy.get_param('survivor_1_x', -6.0),
+             rospy.get_param('survivor_1_y',  3.0)),
+            (rospy.get_param('survivor_2_x',  0.0),
+             rospy.get_param('survivor_2_y', -3.0)),
+            (rospy.get_param('survivor_3_x',  5.0),
+             rospy.get_param('survivor_3_y',  3.0)),
+            (rospy.get_param('ambulance_x',  11.0),
+             rospy.get_param('ambulance_y',   0.0)),
         ]
         self.waypoint_labels = [
-            'Child 1 — NW Classroom',
-            'Teacher — South Corridor',
-            'Child 2 — East Corridor',
-            'Emergency Base — Mission Complete',
+            'Survivor 1',
+            'Survivor 2',
+            'Survivor 3',
+            'Ambulance — Mission Complete',
         ]
         # Survivor waypoints (all non-last waypoints are survivors)
         self.survivor_waypoints = {0, 1, 2}
+        self.survivor_detected  = [False, False, False]   # per-waypoint latch
+        self.survivor_range     = 2.0   # metres — detect even during wall-follow
         self.current_waypoint = 0
 
         # Current navigation goal
@@ -72,27 +79,40 @@ class Bug2:
         self.wall_follow_start  = 0.0   # timestamp when FollowWall began
 
         # Navigation parameters
-        self.speed     = 0.8
-        self.direction = 'left'
+        self.speed          = 1.0   # m/s — faster now that targets are known
+        self.direction      = 'left'
+        self.wall_dir_index = 0   # incremented each recovery; alternates left/right
 
-        # Detection thresholds
-        self.obstacle_threshold   = 0.35
-        self.m_line_threshold     = 0.30  # how close robot must be to M-line to switch back
-        self.goal_threshold       = 1.0
-        self.min_wall_follow_secs = 6.0   # must wall-follow for ≥6 s before returning
-        self.m_line_progress_buf  = 0.50  # must be 0.5 m closer than hit point
-        self.max_wall_follow_secs = 45.0  # escape trap: force GoToPoint after 45 s
+        # Detection thresholds — tuned for fast direct navigation to known coordinates
+        self.obstacle_threshold   = 0.45  # start avoiding obstacles a bit earlier
+        self.m_line_threshold     = 0.50  # more lenient: return to direct path sooner
+        self.goal_threshold       = 1.2   # consider waypoint reached within 1.2 m
+        self.min_wall_follow_secs = 3.0   # only 3 s before checking M-line again
+        self.m_line_progress_buf  = 0.20  # just 0.2 m closer is enough to cut back
+        self.max_wall_follow_secs = 20.0  # force direct path after 20 s max
+
+        # Loop / stuck detection
+        self.loop_detect_radius   = 1.0   # if robot returns within 1 m of hit-point → loop
+        self.stuck_check_interval = 8.0   # seconds between progress samples
+        self.stuck_min_progress   = 0.3   # robot must move ≥ 0.3 m per interval
+        self.stuck_check_time     = 0.0
+        self.stuck_check_pos      = Point()
 
         # Laser front distance
         self.laser_front = float('inf')
 
         # Sensor-ready flags (auto-start fires once both are True)
-        self.got_odom  = False
-        self.got_laser = False
+        self.got_odom    = False
+        self.got_laser   = False
+        self.mission_done = False   # prevents restart after mission complete
 
         # ---- ROS Publishers / Subscribers ----
         self.pub_vel = rospy.Publisher(
             '/com760group30Bot/cmd_vel', Twist, queue_size=1)
+
+        self.pub_survivor = rospy.Publisher(
+            '/com760group30Bot/survivor_detected',
+            SurvivorDetected, queue_size=10)
 
         self.sub_odom = rospy.Subscriber(
             '/com760group30Bot/odom', Odometry, self.callback_odom)
@@ -139,6 +159,8 @@ class Bug2:
                 self.bug2_follow_wall()
             elif self.nav_state == 3:
                 self.waypoint_reached_behaviour()
+            self.check_proximity_detections()
+            self.check_stuck()
             rate.sleep()
 
     # ------------------------------------------------------------------
@@ -146,6 +168,8 @@ class Bug2:
     # ------------------------------------------------------------------
 
     def stand_by(self):
+        if self.mission_done:
+            return   # mission complete — don't restart
         if self.got_odom and self.got_laser:
             rospy.loginfo('[Bug2] Sensors live. Starting mission.')
             self.start_go_to_point()
@@ -190,17 +214,28 @@ class Bug2:
         if elapsed < self.min_wall_follow_secs:
             return
 
+        # Loop detection: robot circled back close to where it hit the obstacle
+        # with no net progress toward the goal → it's looping, recover immediately.
+        hit_return = math.sqrt(
+            (self.position.x - self.obstacle_hit_point.x) ** 2 +
+            (self.position.y - self.obstacle_hit_point.y) ** 2)
+        if (elapsed > self.min_wall_follow_secs * 2 and
+                hit_return < self.loop_detect_radius and
+                dist >= self.obstacle_hit_dist - self.m_line_progress_buf):
+            rospy.logwarn(
+                '[Bug2] Loop detected: back near hit-point (%.2f m) with no goal progress.'
+                ' Recovering.', hit_return)
+            self.deactivate_follow_wall()
+            self._recover_from_stuck()
+            return
+
         # Escape trap: if wall-following too long without M-line progress,
         # force GoToPoint from the current position so the robot doesn't loop forever.
         if elapsed > self.max_wall_follow_secs:
             rospy.logwarn(
-                '[Bug2] Wall-follow timeout (%.0f s). Forcing GoToPoint.', elapsed)
+                '[Bug2] Wall-follow timeout (%.0f s). Recovering.', elapsed)
             self.deactivate_follow_wall()
-            self.start_position.x = self.position.x
-            self.start_position.y = self.position.y
-            self.compute_m_line()
-            self.obstacle_hit_dist = float('inf')
-            self.start_go_to_point()
+            self._recover_from_stuck()
             return
 
         # Return to GoToPoint when back on M-line AND significantly closer
@@ -235,10 +270,11 @@ class Bug2:
             rospy.logwarn('[Bug2] *** MISSION COMPLETE ***')
             rospy.logwarn('[Bug2] *** All survivors located and reported ***')
             rospy.logwarn('=' * 55)
-            self.change_state(0)   # stand by — mission done
+            self.mission_done = True
+            self.change_state(0)   # stand by — mission done (won't restart)
             return
         elif is_survivor:
-            # ---- Survivor found: stop, scan, signal ----
+            # ---- Survivor found: stop, scan, publish, signal ----
             rospy.logwarn('=' * 55)
             rospy.logwarn('[Bug2] *** SURVIVOR LOCATION REACHED ***')
             rospy.logwarn('[Bug2] *** %s ***', lbl)
@@ -246,9 +282,27 @@ class Bug2:
                           self.goal.x, self.goal.y)
             rospy.logwarn('[Bug2] *** Scanning for signs of life... ***')
             rospy.logwarn('=' * 55)
+
+            # Publish detection (skip if proximity check already fired for this one)
+            if not self.survivor_detected[self.current_waypoint]:
+                self.survivor_detected[self.current_waypoint] = True
+                det_msg              = SurvivorDetected()
+                det_msg.survivor_id  = self.current_waypoint + 1
+                det_msg.position_x   = self.goal.x
+                det_msg.position_y   = self.goal.y
+                det_msg.distance     = self.distance_to_goal()
+                det_msg.status       = 'ALIVE'
+                det_msg.timestamp    = str(rospy.get_time())
+                self.pub_survivor.publish(det_msg)
+
             rospy.sleep(3.0)   # pause at survivor location
-            rospy.logwarn('[Bug2] *** SIGNAL SENT — moving to next target ***')
+            rospy.logwarn('[Bug2] *** SIGNAL SENT ***')
             rospy.logwarn('=' * 55)
+
+            # If all survivors were found during the sleep, _redirect_to_emergency_base
+            # already set current_waypoint to the last index — don't override it.
+            if self.current_waypoint >= len(self.waypoints) - 1:
+                return
         else:
             # ---- Transit waypoint: no pause, continue immediately ----
             rospy.loginfo('[Bug2] Transit waypoint %s reached.', lbl)
@@ -266,6 +320,128 @@ class Bug2:
         self.compute_m_line()
         self.obstacle_hit_dist = float('inf')
         self.start_go_to_point()
+
+    # ------------------------------------------------------------------
+    # Continuous proximity survivor detection (runs every loop tick)
+    # ------------------------------------------------------------------
+
+    def check_proximity_detections(self):
+        """Publish SurvivorDetected whenever the robot is within survivor_range
+        of any survivor waypoint, regardless of current nav state.  Uses a
+        per-survivor latch so each is published exactly once.
+        When all 3 are found, immediately redirect to the emergency base."""
+        if not self.got_odom or self.mission_done:
+            return
+        for idx in self.survivor_waypoints:
+            if self.survivor_detected[idx]:
+                continue
+            wp_x, wp_y = self.waypoints[idx]
+            dist = math.sqrt(
+                (self.position.x - wp_x) ** 2 +
+                (self.position.y - wp_y) ** 2)
+            if dist < self.survivor_range:
+                self.survivor_detected[idx] = True
+                det_msg             = SurvivorDetected()
+                det_msg.survivor_id = idx + 1
+                det_msg.position_x  = wp_x
+                det_msg.position_y  = wp_y
+                det_msg.distance    = dist
+                det_msg.status      = 'ALIVE'
+                det_msg.timestamp   = str(rospy.get_time())
+                self.pub_survivor.publish(det_msg)
+                rospy.logwarn('[Bug2] *** PROXIMITY DETECTION: survivor %d at'
+                              ' (%.1f, %.1f), dist=%.2f m ***',
+                              idx + 1, wp_x, wp_y, dist)
+
+        # All 3 found — cut straight to the emergency base from here
+        if (all(self.survivor_detected) and
+                not self.mission_done and
+                self.current_waypoint < len(self.waypoints) - 1):
+            self._redirect_to_emergency_base()
+
+    def _redirect_to_emergency_base(self):
+        """Abort current navigation and head directly to the emergency base.
+        Called from the main loop thread so there is no concurrent-write risk."""
+        rospy.logwarn('=' * 55)
+        rospy.logwarn('[Bug2] *** ALL SURVIVORS FOUND ***')
+        rospy.logwarn('[Bug2] *** SHORTEST ROUTE TO EMERGENCY BASE ***')
+        rospy.logwarn('=' * 55)
+        self.current_waypoint  = len(self.waypoints) - 1
+        self.goal.x            = self.waypoints[-1][0]
+        self.goal.y            = self.waypoints[-1][1]
+        self.obstacle_hit_dist = float('inf')   # reset M-line bias
+        if self.nav_state == 2:
+            self.deactivate_follow_wall()
+        elif self.nav_state == 1:
+            self.deactivate_go_to_point()
+        self.start_go_to_point()
+
+    # ------------------------------------------------------------------
+    # Stuck / loop recovery
+    # ------------------------------------------------------------------
+
+    def check_stuck(self):
+        """Position-progress check: if the robot hasn't moved enough in
+        stuck_check_interval seconds while actively navigating, trigger
+        recovery.  Catches tight-corner spinning that loop detection misses."""
+        if self.mission_done or not self.got_odom:
+            return
+        now = rospy.get_time()
+        if self.nav_state not in (1, 2):
+            # Not actively navigating — keep the reference position fresh.
+            self.stuck_check_time    = now
+            self.stuck_check_pos.x   = self.position.x
+            self.stuck_check_pos.y   = self.position.y
+            return
+        if now - self.stuck_check_time < self.stuck_check_interval:
+            return
+        moved = math.sqrt(
+            (self.position.x - self.stuck_check_pos.x) ** 2 +
+            (self.position.y - self.stuck_check_pos.y) ** 2)
+        self.stuck_check_pos.x = self.position.x
+        self.stuck_check_pos.y = self.position.y
+        self.stuck_check_time  = now
+        if moved < self.stuck_min_progress:
+            rospy.logwarn(
+                '[Bug2] Stuck detected: moved only %.2f m in %.0f s. Recovering.',
+                moved, self.stuck_check_interval)
+            if self.nav_state == 1:
+                self.deactivate_go_to_point()
+            elif self.nav_state == 2:
+                self.deactivate_follow_wall()
+            self._recover_from_stuck()
+
+    def _recover_from_stuck(self):
+        """Back up, rotate ~90° in alternating directions, then restart GoToPoint.
+        Blocking is intentional: recovery must complete before navigation resumes."""
+        self.wall_dir_index += 1
+        self.direction = 'right' if (self.wall_dir_index % 2) else 'left'
+
+        rospy.logwarn('[Bug2] Recovery: backing up...')
+        back = Twist()
+        back.linear.x = -0.3
+        t_end = rospy.get_time() + 1.5
+        while rospy.get_time() < t_end and not rospy.is_shutdown():
+            self.pub_vel.publish(back)
+            rospy.sleep(0.05)
+
+        rospy.logwarn('[Bug2] Recovery: rotating (dir=%s)...', self.direction)
+        spin = Twist()
+        spin.angular.z = 0.6 if self.direction == 'right' else -0.6
+        # π/2 rad at 0.6 rad/s ≈ 2.6 s
+        t_end = rospy.get_time() + 2.6
+        while rospy.get_time() < t_end and not rospy.is_shutdown():
+            self.pub_vel.publish(spin)
+            rospy.sleep(0.05)
+
+        self.stop_robot()
+        self.obstacle_hit_dist = float('inf')
+        # Reset stuck timer so we don't immediately re-trigger.
+        self.stuck_check_time  = rospy.get_time()
+        self.stuck_check_pos.x = self.position.x
+        self.stuck_check_pos.y = self.position.y
+        self.start_go_to_point()
+        rospy.logwarn('[Bug2] Recovery complete. Resuming GoToPoint.')
 
     # ------------------------------------------------------------------
     # M-line helpers
@@ -390,17 +566,18 @@ class Bug2:
     # ------------------------------------------------------------------
 
     def handle_homing_signal(self, req):
-        if req.flag:
-            rospy.logwarn('[Bug2] External homing signal! Jumping to emergency base.')
-            self.current_waypoint = len(self.waypoints) - 1
-            self.goal.x = self.waypoints[-1][0]
-            self.goal.y = self.waypoints[-1][1]
-            self.deactivate_follow_wall()
-            self.start_go_to_point()
+        """External homing override (called from a service-callback thread).
+        We only mark all survivors found so the main loop's
+        check_proximity_detections picks it up safely on its next tick."""
+        if req.flag and not self.mission_done:
+            rospy.logwarn('[Bug2] External homing signal received.')
+            # Mark all survivors so check_proximity_detections redirects cleanly
+            for i in range(len(self.survivor_detected)):
+                self.survivor_detected[i] = True
             return MineRescueSetBugStatusResponse(
-                success=True, message='Homing to emergency base')
+                success=True, message='Homing queued via survivor flags')
         return MineRescueSetBugStatusResponse(
-            success=False, message='Flag not set')
+            success=False, message='Flag not set or mission already done')
 
 
 if __name__ == '__main__':

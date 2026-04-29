@@ -1,4 +1,6 @@
 <launch>
+  <env name="PYTHONPATH" value="/home/kavya/com760_ws/devel/lib/python3/dist-packages:$(env PYTHONPATH)" />
+
   <!-- Q-Learning mode: robot learns autonomously, no Bug2 coordinator -->
 
   <param name="robot_description"

@@ -1,6 +1,26 @@
 <launch>
+  <env name="PYTHONPATH" value="/home/kavya/com760_ws/devel/lib/python3/dist-packages:$(env PYTHONPATH)" />
+
   <param name="th_yaw"  value="2.0"/>
   <param name="th_dist" value="0.25"/>
+
+  <!-- ============================================================
+       MISSION TARGET COORDINATES
+       Edit these values to change where the robot goes.
+       Survivors: the three injured people in the collapsed school.
+       Ambulance: the green emergency base the robot returns to.
+       ============================================================ -->
+  <param name="survivor_1_x" value="-6.0"/>
+  <param name="survivor_1_y" value="3.0"/>
+
+  <param name="survivor_2_x" value="0.0"/>
+  <param name="survivor_2_y" value="-3.0"/>
+
+  <param name="survivor_3_x" value="5.0"/>
+  <param name="survivor_3_y" value="3.0"/>
+
+  <param name="ambulance_x"  value="11.0"/>
+  <param name="ambulance_y"  value="0.0"/>
 
   <param name="robot_description"
     command="cat $(find com760cw2_com760group30)/urdf/com760group30Bot.urdf"/>

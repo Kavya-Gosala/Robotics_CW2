@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # COM760 Group 30 - Collapsed School Rescue Robot
 # GoToPoint.py - Moves robot from current position to target point
